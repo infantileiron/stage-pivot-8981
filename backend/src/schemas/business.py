@@ -1,6 +1,7 @@
 from pydantic import BaseModel,Field,model_validator
 from typing import Literal
 from datetime import date
+from src.constants.enums import CHANNELS
 Dimension=Literal['venue','play','channel','month']
 class Login(BaseModel):email:str;password:str
 class SettlementInput(BaseModel):
@@ -36,3 +37,26 @@ class ReviewInput(BaseModel):
 class ReviewEdit(BaseModel):
  expected_cents:int=Field(ge=0,le=1000000000000)
  note:str=Field(min_length=8,max_length=2000)
+class TierInput(BaseModel):
+ from_cents:int=Field(ge=0,le=100000000000)
+ rate_bp:int=Field(ge=0,le=10000)
+class ContractInput(BaseModel):
+ name:str=Field(min_length=2,max_length=100)
+ channel:Literal['剧院直营','票务合作','团体专场']
+ month_from:str=Field(pattern=r'^\d{4}-(0[1-9]|1[0-2])$')
+ month_to:str=Field(pattern=r'^\d{4}-(0[1-9]|1[0-2])$')
+ tiers:list[TierInput]=Field(min_length=1)
+ @model_validator(mode='after')
+ def span_ok(self):
+  if self.month_from>self.month_to:raise ValueError('生效起始月份不得晚于结束月份')
+  return self
+class FeeRunInput(BaseModel):
+ months:list[str]=Field(min_length=1,max_length=24)
+ take_over:bool=False
+ @model_validator(mode='after')
+ def months_ok(self):
+  for m in self.months:
+   if not (len(m)==7 and m[4]=='-' and m[:4].isdigit() and 1<=int(m[5:])<=12):raise ValueError('月份格式应为 YYYY-MM')
+  if len(set(self.months))!=len(self.months):raise ValueError('月份不可重复')
+  self.months=sorted(self.months)
+  return self

@@ -1,8 +1,9 @@
 import random
 from datetime import date,timedelta
 from src.config.database import Base,engine,Session
-from src.models.entities import User,Settlement
+from src.models.entities import User,Settlement,FeeContract
 from src.utils.security import hash_password
+from src.services.fee_runs import now
 from src.constants.enums import VENUES,CHANNELS
 def seed():
  Base.metadata.create_all(engine);rng=random.Random(3112)
@@ -13,5 +14,13 @@ def seed():
   for i in range(180):
    code=f'YM-{i+1:03}';seats=[800,240,120][i%3];checked=rng.randint(seats//2,seats);gross=checked*rng.choice([8000,12000,18000]);refund=rng.randint(0,checked//10)*8000;fee=int((gross-refund)*[0,.07,.03][i%3])
    if not s.query(Settlement).filter_by(code=code).first():s.add(Settlement(code=code,day=(date(2026,9,1)+timedelta(days=i//3)).isoformat(),venue=VENUES[i%3],play=['渡口来信','星河漫游','一间书房','冬日序曲'][i%4],channel=CHANNELS[(i//3)%3],gross_cents=gross,refund_cents=refund,fee_cents=fee,seats=seats,checked=checked))
-  s.commit();print({'users':s.query(User).count(),'settlements':s.query(Settlement).count()})
+  demo_contracts={
+   '剧院直营':[{'from_cents':0,'rate_bp':700},{'from_cents':2000000,'rate_bp':500},{'from_cents':5000000,'rate_bp':300}],
+   '票务合作':[{'from_cents':0,'rate_bp':500},{'from_cents':3000000,'rate_bp':300}],
+   '团体专场':[{'from_cents':0,'rate_bp':300}],
+  }
+  for channel,tiers in demo_contracts.items():
+   name=f'{channel}阶梯费率合同'
+   if not s.query(FeeContract).filter_by(name=name).first():s.add(FeeContract(name=name,channel=channel,month_from='2026-09',month_to='2026-12',tiers=tiers,status='enabled',created=now(),updated=now()))
+  s.commit();print({'users':s.query(User).count(),'settlements':s.query(Settlement).count(),'fee_contracts':s.query(FeeContract).count()})
 if __name__=='__main__':seed()

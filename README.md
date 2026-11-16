@@ -6,7 +6,7 @@
 
 云幕剧院有云幕大剧场、河畔小剧场和星光排练厅。财务组当前把 `云幕_场次结算_20261115.xlsx` 中多张表复制到工作簿，再按场馆和渠道求和，最后在邮件里解释回单差异。痛点是座位百分比被简单平均、分币四舍五入不守恒、原始明细改动后难以重现旧结论。上游是独立场次票款及核验记录；本项目替代布局、计算、追溯及复核；下游是财务负责人核对渠道回单，不触发付款。
 
-四页：结算明细（录入/修订）、透视布局（白名单行列方案）、结算透视（守恒总计/冻结下钻/导出）、差异复核（回单预期/原因/签核）。三核心实体 Settlement、Pivot、Review，另有User/Audit。每条记录为独立场次，渠道是主售票渠道；当前不拆分同一场次的多个售票渠道座位。
+六页：结算明细（录入/修订）、透视布局（白名单行列方案）、结算透视（守恒总计/冻结下钻/导出）、差异复核（回单预期/原因/签核）、费率合同（按渠道与生效月份维护阶梯）、渠道费计算（待算→发布、分档依据与导出）。三核心实体 Settlement、Pivot、Review，渠道费扩展 FeeContract/FeeRun/FeeRunMonth/FeeMonth/FeeAllocation，另有User/Audit。每条记录为独立场次，渠道是主售票渠道；当前不拆分同一场次的多个售票渠道座位。
 
 |角色|权限|动作|
 |---|---|---|
@@ -44,6 +44,14 @@ docker compose exec -T backend python -m scripts.seed_demo
 
 提交时冻结输入快照，worker保留checksum。下钻只读该快照，原始明细修订不会改变历史结果。差异=回单预期净额−冻结账面净额，可正可负。签核只确认复核理由，不改账、不付款。已签核Review不可更新，需新增复核；Pivot为不可覆盖版本，重新计算需新建。空数据、重复场次或非法维度失败可恢复，补录/调整后新建任务。单worker启动恢复queued/running任务。
 
+## 渠道阶梯费率合同与计费
+
+渠道费不再逐场手填：按“渠道 + 生效月份区间”维护阶梯费率合同，费率以基点存储（10000bp=100%），首档下限必须为0且各档下限严格递增。同渠道同月只允许一份启用合同，启用或保存启用中合同时若区间重叠返回409；新建合同默认停用。合同可追溯调整，调整、停用、启用都会把覆盖到的已发布月份标 `stale` 并把待算任务对应月份标记重算。
+
+计费口径：每场基数=票款−退款；同渠道同月份场次按日期、编号排序后累计基数，按合同阶梯对月累计金额分段，每档 `落在该档的金额×费率` 向下取整分；逐场费用=截至本场的累计费用−上一场累计费用，天然为非负整数分且逐场之和严格等于月累计总费用。无合同的渠道月份不产生费用、不落账。
+
+计费任务从 queued→running→done，失败 failed 可恢复：提交时冻结场次与合同双快照及checksum，计算期间允许修订源数据，发布前重新校验checksum，过期结果拒绝落账（不落任何账），重建快照后重试；整月账本在MySQL咨询锁内删除旧分摊并原子替换，重试不重复扣费。透视提交取数与账本替换共用同一咨询锁互斥。结算行改金额、换渠道时新旧两个渠道月份都标记重算；含手填 `fee_cents` 的月份提交时返回409及场次清单，勾选“确认接管”后才由合同计费，手填值保留在结算行与分摊留痕字段。已发布的 FeeRun、FeeMonth、FeeAllocation 历史结果保留，重算只替换对应整月账本。分档依据可逐场查询并导出 `fee-basis-<月份>.json`。
+
 ## 技术和目录
 
 |层|实现|
@@ -53,10 +61,10 @@ docker compose exec -T backend python -m scripts.seed_demo
 |持久化|MySQL8 + Redis7 + 共享结果卷|
 |网关|Nginx1.27，同源`/api/`剥离前缀转到后端根路由|
 
-`backend/src`分routes/controllers/services/models/schemas/config/middlewares/utils/constants；`frontend/src`分api/stores/pages/components/hooks/utils/constants/types/router。Settlement、Pivot、Review贯穿数据库/API/页面。请求ID、安全响应头两中间件；写操作审计、全局错误响应。角色ROLES、状态STATES、维度DIMENSIONS、场馆VENUES、渠道CHANNELS：后端`src/constants/enums.py`与`schemas/business.py`，前端`src/constants/enums.js`；算法维度白名单另见后端`services/analysis.py`；持久化列见models/entities.py。
+`backend/src`分routes/controllers/services/models/schemas/config/middlewares/utils/constants；`frontend/src`分api/stores/pages/components/hooks/utils/constants/types/router。Settlement、Pivot、Review与FeeContract、FeeRun、FeeMonth、FeeAllocation贯穿数据库/API/页面。worker同时消费透视队列`stage:pivots`与渠道费队列`stage:fee_runs`，启动恢复两类queued/running任务；整月原子替换与透视取数经`GET_LOCK('stage:fee_ledger')`互斥，SQLite环境下降级为进程内锁。请求ID、安全响应头两中间件；写操作审计、全局错误响应。角色ROLES、状态STATES、维度DIMENSIONS、场馆VENUES、渠道CHANNELS：后端`src/constants/enums.py`与`schemas/business.py`，前端`src/constants/enums.js`；算法维度白名单另见后端`services/analysis.py`，阶梯计费引擎见`services/fees.py`、任务发布见`services/fee_runs.py`；持久化列见models/entities.py。
 
 5服务frontend/backend/worker/db/redis均有healthcheck。backend等db/redis，worker额外等backend，frontend等backend。MySQL/Redis/结果使用命名卷，worker `/tmp/heartbeat`验证活性，结果落共享 `/artifacts`。`NETWORK_SUBNET=10.253.112.0/24`规避本机默认地址池耗尽，可移机修改；其他环境变量COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、DB_PASSWORD、JWT_SECRET、SEED_DEMO见.env.example。演示密码与JWT密钥部署时替换。
 
 本地开发：先起db/redis，在backend安装requirements并配置DATABASE_URL/REDIS_URL/JWT_SECRET，运行 `uvicorn src.main:app --reload`；前端继续用Nginx同源代理。初表由ORM创建，migrations提供对应初始DDL，无在线版本迁移执行器。清理用 `docker compose down -v --remove-orphans`。
 
-范围：逐条表单/API录入，无Excel导入、删除/分页或多渠道拆场；仅提供JSON完整导出；回单预期人工输入，不对接银行；本地签核、单worker、Google Fonts离线回退。测试与截图在 `../../test-artifacts/gb-3112/TESTING.md`，不在源码目录。许可证MIT，见LICENSE。
+范围：逐条表单/API录入，无Excel导入、删除/分页或多渠道拆场；仅提供JSON完整导出；回单预期人工输入，不对接银行；本地签核、单worker、Google Fonts离线回退。测试在仓库 `tests/`（pytest，SQLite内存/临时库+假Redis，覆盖阶梯守恒、快照过期、原子替换、互斥锁、worker恢复与原有透视回归）。许可证MIT，见LICENSE。
